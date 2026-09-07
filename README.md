@@ -4,7 +4,7 @@
 
 A sleek, event-driven, zero-polling workspace widget for [AeroSpace](https://github.com/nikitabobko/AeroSpace) on macOS, built for [Übersicht](https://github.com/felixhageloh/uebersicht). It supports multi-monitor tracking, instant app-icon caching, and has been aggressively optimized to consume virtually 0% idle CPU.
 
-<img src="preview/preview1.jpg" width="200"/> | <img src="preview/preview2.jpg" width="200"/> 
+<img src="preview/preview1.jpg" width="400"/> | <img src="preview/preview2.jpg" width="400"/> 
 
 ## ✨ Features
 - **AeroSpace Integration**: Instantly tracks workspaces and active windows across multiple monitors.
