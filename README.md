@@ -1,6 +1,6 @@
-# AeroSpace SideBar Widget for Ubersicht
+# AeroSpace Sidebar Widget for Ubersicht
 
-![SideBar Preview](preview.png)
+![Sidebar Preview](screenshot.png)
 
 A sleek, event-driven, zero-polling workspace widget for [AeroSpace](https://github.com/nikitabobko/AeroSpace) on macOS, built for [Übersicht](https://github.com/felixhageloh/uebersicht). It supports multi-monitor tracking, instant app-icon caching, and has been aggressively optimized to consume virtually 0% idle CPU.
 
@@ -18,12 +18,12 @@ A sleek, event-driven, zero-polling workspace widget for [AeroSpace](https://git
    cd ~/Library/Application\ Support/Übersicht/widgets/
    git clone https://github.com/GranthikSom/VerticalBar
    ```
-   > **Important:** The repository contains a `SideBar.widget` directory that Übersicht will automatically recognize.
+   > **Important:** The repository contains a `Sidebar.widget` directory that Übersicht will automatically recognize.
 
 3. Update your `~/.aerospace.toml` config to instantly trigger the widget on workspace or focus changes:
    ```toml
-   exec-on-workspace-change = ['bash', '-c', 'exec-and-forget osascript -e "tell application \\"Übersicht\\" to refresh widget id \\"SideBar-widget-index-jsx\\""']
-   on-focus-changed = ['exec-and-forget osascript -e "tell application \\"Übersicht\\" to refresh widget id \\"SideBar-widget-index-jsx\\""']
+   exec-on-workspace-change = ['bash', '-c', 'exec-and-forget osascript -e "tell application \\"Übersicht\\" to refresh widget id \\"Sidebar-widget-index-jsx\\""']
+   on-focus-changed = ['exec-and-forget osascript -e "tell application \\"Übersicht\\" to refresh widget id \\"Sidebar-widget-index-jsx\\""']
    ```
 
 ---
@@ -56,7 +56,7 @@ All `css({...})` function calls have been extracted *outside* of the React `rend
 To move the widget to the right side of the screen, open `index.jsx` and look for the `export const className` block at the top. Change `left: "10px"` to `right: "10px"`.
 
 ### Adding a New Audio Device (e.g. New AirPods)
-If you buy new headphones and they show up as the "Speaker" icon, check the output of `SideBar.widget/audio_device`. 
+If you buy new headphones and they show up as the "Speaker" icon, check the output of `Sidebar.widget/audio_device`. 
 Then, open `index.jsx` and add a unique keyword from that output into the regex parser:
 ```javascript
 // Find this line:
