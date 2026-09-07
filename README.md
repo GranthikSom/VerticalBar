@@ -28,7 +28,7 @@ A sleek, event-driven, zero-polling workspace widget for [AeroSpace](https://git
 
 ---
 
-## ⚡ The "Ponytail" Optimization Architecture
+## ⚡ The Optimization Architecture
 
 To keep this widget instantaneous, several extreme optimizations were applied. **Do not undo these if you fork.**
 
