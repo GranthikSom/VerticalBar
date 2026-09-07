@@ -1,6 +1,6 @@
 # AeroSpace Sidebar Widget for Ubersicht
 
-![Sidebar Preview](screenshot.png)
+<img src="screenshot.png" alt="preview" width="800">
 
 A sleek, event-driven, zero-polling workspace widget for [AeroSpace](https://github.com/nikitabobko/AeroSpace) on macOS, built for [Übersicht](https://github.com/felixhageloh/uebersicht). It supports multi-monitor tracking, instant app-icon caching, and has been aggressively optimized to consume virtually 0% idle CPU.
 
