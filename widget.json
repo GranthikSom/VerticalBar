@@ -1,6 +1,8 @@
 {
-  "name": "Vertical Bar",
+  "name": "SideBar",
   "description": "A responsive AeroSpace status bar with workspaces, active windows per monitor, and hardware stats.",
   "author": "Granthik Som",
-  "email": "granthiksom@gmail.com"
+  "email": "granthiksom@gmail.com",
+  "version": "1.0.0",
+  "github": "https://github.com/GranthikSom/Ubersicht-and-aeroSpace-config"
 }

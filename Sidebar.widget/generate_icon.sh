@@ -9,10 +9,16 @@ OUT_FILE="$OUT_DIR/$APP_NAME.png"
 
 mkdir -p "$OUT_DIR"
 
-# 1. First, search using mdfind (fastest reliable way if indexed)
-APP_PATH=$(mdfind "kMDItemKind == 'Application' && kMDItemFSName == '${APP_NAME}.app'" | head -n 1)
+# ponytail: lsappinfo resolves running app display name → actual bundle path.
+# This fixes apps where process name != bundle name (e.g. "Code" → "Visual Studio Code.app")
+APP_PATH=$(lsappinfo info -only bundlepath "$APP_NAME" 2>/dev/null | sed -n 's/.*"\(\/.*\.app\)".*/\1/p')
 
-# 2. Fallbacks
+# Fallback: mdfind by bundle name
+if [ -z "$APP_PATH" ]; then
+  APP_PATH=$(mdfind "kMDItemKind == 'Application' && kMDItemFSName == '${APP_NAME}.app'" | head -n 1)
+fi
+
+# Fallback: common filesystem paths
 if [ -z "$APP_PATH" ]; then
   if [ -d "/Applications/${APP_NAME}.app" ]; then APP_PATH="/Applications/${APP_NAME}.app"
   elif [ -d "/System/Applications/${APP_NAME}.app" ]; then APP_PATH="/System/Applications/${APP_NAME}.app"
@@ -38,5 +44,5 @@ if [ -n "$APP_PATH" ]; then
   fi
 fi
 
-# 3. If all fails, copy fallback
+# If all fails, copy fallback
 cp "$OUT_DIR/fallback.png" "$OUT_FILE"

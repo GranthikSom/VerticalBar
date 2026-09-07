@@ -6,14 +6,16 @@ import { css, run, React } from "uebersicht";
 export const refreshFrequency = false;
 
 const screenWidth = window.screen.width;
-const barWidth = screenWidth - 100;
+
+// ponytail: Panel width stays fixed at 50px (matching aerospace outer.left gap).
+const panelWidth = 50;
 
 const options = {
-  width: screenWidth / 2 - barWidth / 2 + "px",
+  width: panelWidth + "px",
 };
 
 const FAST_CMD = `/opt/homebrew/bin/aerospace list-workspaces --focused 2>/dev/null; echo "---"; /opt/homebrew/bin/aerospace list-windows --all --format "%{monitor-name}|%{workspace}|%{app-name}" 2>/dev/null`;
-const SLOW_CMD = `ifconfig en0 2>/dev/null; echo "---"; SideBar.widget/audio_device 2>/dev/null; echo "---"; pmset -g batt; echo "---"; networksetup -getairportpower en0 2>/dev/null`;
+const SLOW_CMD = `ifconfig en0 2>/dev/null; echo "---"; SideBar.widget/audio_device 2>/dev/null; echo "---"; pmset -g batt; echo "---"; networksetup -getairportpower en0 2>/dev/null; echo "---"; vm_stat 2>/dev/null; echo "---"; sysctl vm.swapusage hw.memsize 2>/dev/null`;
 
 // In-memory icon cache to completely eliminate DOM image loading delays and onError thrashing
 if (typeof window !== "undefined" && !window.statBarIconCache) {
@@ -24,7 +26,29 @@ if (typeof window !== "undefined" && !window.statBarIconCache) {
   });
 }
 
+// ponytail: Icon generation runs independently of dedup — checks app list against icon cache
+// and generates missing icons regardless of whether the aerospace output string changed.
+const ensureIcons = (monitors, dispatch) => {
+  if (!monitors || !window.statBarIconCache) return;
+  monitors.forEach(mon => {
+    mon.apps.forEach(appObj => {
+      const appName = appObj.name;
+      if (!window.statBarIconCache.has(appName) && !window.statBarPendingIcons.has(appName)) {
+        window.statBarPendingIcons.add(appName);
+        const safeName = appName.replace(/"/g, '\\"');
+        run(`SideBar.widget/generate_icon.sh "${safeName}"`).then(() => {
+          window.statBarIconCache.add(appName);
+          window.statBarPendingIcons.delete(appName);
+          dispatch({ type: "ICON_LOADED" });
+        });
+      }
+    });
+  });
+};
+
 const handleFastOutput = (output, dispatch) => {
+  if (window.statBarLastFast === output) return;
+  window.statBarLastFast = output;
   try {
     const parts = output.split('---');
     const workspace = parts[0]?.trim() || "N/A";
@@ -59,21 +83,7 @@ const handleFastOutput = (output, dispatch) => {
       })
     }));
 
-    parsedMonitors.forEach(mon => {
-      mon.apps.forEach(appObj => {
-        const appName = appObj.name;
-        if (window.statBarIconCache && !window.statBarIconCache.has(appName) && !window.statBarPendingIcons.has(appName)) {
-          window.statBarPendingIcons.add(appName);
-          const safeName = appName.replace(/"/g, '\\"');
-          run(`SideBar.widget/generate_icon.sh "${safeName}"`).then(() => {
-            window.statBarIconCache.add(appName);
-            window.statBarPendingIcons.delete(appName);
-            dispatch({ type: "ICON_LOADED" });
-          });
-        }
-      });
-    });
-
+    ensureIcons(parsedMonitors, dispatch);
     dispatch({ type: "UPDATE_FAST_STATS", data: { workspace, monitors: parsedMonitors } });
   } catch (e) {
     dispatch({ type: "ERROR", error: e.toString() });
@@ -81,6 +91,8 @@ const handleFastOutput = (output, dispatch) => {
 };
 
 const handleSlowOutput = (output, dispatch) => {
+  if (window.statBarLastSlow === output) return;
+  window.statBarLastSlow = output;
   try {
     const parts = output.split('---');
     
@@ -105,49 +117,107 @@ const handleSlowOutput = (output, dispatch) => {
     const battery = battMatch ? battMatch[1] : "?";
     const isCharging = /AC Power|\bcharging\b/i.test(batteryRaw);
 
-    dispatch({ type: "UPDATE_SLOW_STATS", data: { wifiSpeed, audioType, battery, isCharging } });
+    // RAM & swap — only parse when charging (displayed only on charger)
+    let ramUsed = null;
+    let swapUsed = null;
+    if (isCharging) {
+      const vmStatRaw = parts[4] || "";
+      const sysctlRaw = parts[5] || "";
+
+      // vm_stat: page size line + "Pages active/inactive/speculative/wired" lines
+      const pageSize = 16384;
+      const getPages = label => {
+        const m = vmStatRaw.match(new RegExp(label + ':\\s+(\\d+)'));
+        return m ? parseInt(m[1]) : 0;
+      };
+      // Activity Monitor "Memory Used" formula: (App Memory + Wired + Compressed)
+      // App Memory = Anonymous pages - Purgeable pages
+      const usedPages = getPages('Anonymous pages') - getPages('Pages purgeable') + getPages('Pages wired down') + getPages('Pages occupied by compressor');
+      const totalMem = parseInt((sysctlRaw.match(/hw\.memsize:\s+(\d+)/) || [])[1]) || 0;
+      const usedBytes = usedPages * pageSize;
+      ramUsed = totalMem > 0 ? (usedBytes / (1024 ** 3)).toFixed(1) : null;
+
+      // swap
+      const swapMatch = sysctlRaw.match(/used\s*=\s*([\d.]+)M/);
+      if (swapMatch) {
+        const swapMB = parseFloat(swapMatch[1]);
+        swapUsed = swapMB >= 1024 ? (swapMB / 1024).toFixed(1) + "G" : Math.round(swapMB) + "M";
+      }
+    }
+
+    dispatch({ type: "UPDATE_SLOW_STATS", data: { wifiSpeed, audioType, battery, isCharging, ramUsed, swapUsed } });
+
+    // Auto-switch polling rates when charger is plugged/unplugged
+    const expectedRate = isCharging ? 'charging' : 'battery';
+    if (window.statBarCurrentRate !== expectedRate && window.statBarDispatch) {
+      setupIntervals(window.statBarDispatch, isCharging);
+    }
   } catch (e) {
     dispatch({ type: "ERROR", error: e.toString() });
   }
 };
 
-export const command = dispatch => {
+// ponytail: Adaptive polling — aggressive when plugged in, conservative on battery.
+// Charging: 1s fast + 2s slow (extremely responsive for RAM/Swap, battery irrelevant)
+// Battery:  3s fast + 30s slow (conservative)
+const RATES = {
+  charging: { fast: 1000, slow: 2000, tick: 30000 },
+  battery:  { fast: 3000, slow: 30000, tick: 30000 },
+};
+
+const setupIntervals = (dispatch, charging) => {
   if (window.statBarFastClock) clearInterval(window.statBarFastClock);
   if (window.statBarSlowClock) clearInterval(window.statBarSlowClock);
-  
-  // Fast loop: Workspaces and Windows (Instant response ~300ms, extremely lightweight)
+  if (window.statBarTickClock) clearInterval(window.statBarTickClock);
+
+  const rate = charging ? RATES.charging : RATES.battery;
+  window.statBarCurrentRate = charging ? 'charging' : 'battery';
+
   window.statBarFastClock = setInterval(() => {
     run(FAST_CMD).then(output => handleFastOutput(output, dispatch));
-  }, 300);
+  }, rate.fast);
 
-  // Slow loop: Battery, Wi-Fi, Audio (runs every 5 seconds)
   window.statBarSlowClock = setInterval(() => {
-    dispatch({ type: "TICK" });
     run(SLOW_CMD).then(output => handleSlowOutput(output, dispatch));
-  }, 5000);
+  }, rate.slow);
 
+  window.statBarTickClock = setInterval(() => {
+    dispatch({ type: "TICK" });
+  }, rate.tick);
+};
+
+export const command = dispatch => {
+  // Store dispatch for rate switching from handleSlowOutput
+  window.statBarDispatch = dispatch;
+
+  setupIntervals(dispatch, false); // start conservative, will switch on first slow poll
+
+  // Clear dedup caches so this trigger always processes fresh data + generates icons
+  window.statBarLastFast = null;
+  window.statBarLastSlow = null;
+
+  // Immediate fetch on every trigger (including AeroSpace event callbacks)
   run(FAST_CMD).then(output => handleFastOutput(output, dispatch));
   run(SLOW_CMD).then(output => handleSlowOutput(output, dispatch));
 };
 
 export const className = {
-  top: "6px",
-  left: "4px",
-  bottom: "6px",
-  width: options.width,
+  top: "0px",
+  left: "0px",
+  right: "0px",
+  bottom: "0px",
   userSelect: "none",
-  backgroundColor: "rgba(1, 53, 54, 0.66)",
-  backdropFilter: "blur(20px)",
-  WebkitBackdropFilter: "blur(20px)",
-  border: "1px solid #00b3b3",
-  padding: "12px",
+  backgroundColor: "transparent",
+  padding: "0px",
   boxSizing: "border-box",
-  borderRadius: "16px",
-  boxShadow: "0 8px 32px 0 rgba(0, 0, 0, 0.3)",
+  borderRadius: "0px",
+  boxShadow: "none",
+  overflow: "visible",
+  pointerEvents: "none",
 };
 
 const containerClassName = css({
-  color: "#00b3b3",
+  color: "#ffffff",
   fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
   fontSize: "14px",
   fontWeight: "500",
@@ -158,8 +228,77 @@ const containerClassName = css({
   alignItems: "stretch",
 });
 
-const cyan = css({ color: "#00b3b3" });
-const orange = css({ color: "#FF8C00" });
+const straightRightBorder = css({
+  position: "absolute",
+  right: "-1px",
+  top: "24px",
+  bottom: "24px",
+  width: "0px",
+  backgroundColor: "rgb(253, 253, 253)",
+  zIndex: 10,
+});
+
+const topFlare = css({
+  position: "absolute",
+  top: 0,
+  right: "-24px",
+  width: "24px",
+  height: "24px",
+  background: "radial-gradient(circle at 100% 100%, transparent 22.5px, rgba(255, 255, 255, 0.02) 23px, rgba(255, 255, 255, 0) 24px, rgb(0, 0, 0) 24.5px)",
+  zIndex: 10,
+});
+
+const bottomFlare = css({
+  position: "absolute",
+  bottom: 0,
+  right: "-24px",
+  width: "24px",
+  height: "24px",
+  background: "radial-gradient(circle at 100% 0%, transparent 22.5px, rgba(255, 255, 255, 0) 23px, rgba(255, 255, 255, 0) 24px, rgb(0, 0, 0) 24.5px)",
+  zIndex: 10,
+});
+
+
+const leftPanelClass = css({
+  position: "absolute",
+  left: 0,
+  top: 0,
+  bottom: 0,
+  width: options.width,
+  backgroundColor: "rgb(0, 0, 0)",
+  padding: "12px",
+  boxSizing: "border-box",
+  boxShadow: "8px 0 32px 0 rgba(0, 0, 0, 0.3)",
+  overflow: "visible",
+  pointerEvents: "auto",
+});
+
+const rightPanelTopFlare = css({
+  position: "absolute",
+  top: 0,
+  right: 0,
+  width: "24px",
+  height: "24px",
+  background: "radial-gradient(circle at 0% 100%, transparent 22.5px, rgb(0, 0, 0) 23px, rgb(0, 0, 0) 24px, rgb(0, 0, 0) 24.5px)",
+  zIndex: 10,
+  pointerEvents: "none",
+});
+
+const rightPanelBottomFlare = css({
+  position: "absolute",
+  bottom: 0,
+  right: 0,
+  width: "24px",
+  height: "24px",
+  background: "radial-gradient(circle at 0% 0%, transparent 22.5px, rgba(255, 255, 255, 0) 23px, rgba(255, 255, 255, 0) 24px, rgb(0, 0, 0) 24.5px)",
+  zIndex: 10,
+  pointerEvents: "none",
+});
+
+
+
+const cyan = css({ color: "#cccccc" });
+const orange = css({ color: "#dddddd" });
 
 const metricStyle = css({
   display: "flex",
@@ -207,6 +346,8 @@ export const initialState = cachedState || {
   audioType: "speaker",
   battery: "?",
   isCharging: false,
+  ramUsed: null,
+  swapUsed: null,
   tick: 0
 };
 
@@ -220,16 +361,13 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === "UPDATE_FAST_STATS") {
-    const newState = {
+    // ponytail: no localStorage write here — workspace refreshes within 1s on reload anyway
+    return {
       ...previousState,
       workspace: event.data.workspace,
       monitors: event.data.monitors,
       warning: false
     };
-    if (typeof window !== "undefined") {
-      try { window.localStorage.setItem("sidebarState", JSON.stringify(newState)); } catch (e) {}
-    }
-    return newState;
   }
   
   if (event.type === "UPDATE_SLOW_STATS") {
@@ -239,6 +377,8 @@ export const updateState = (event, previousState) => {
       audioType: event.data.audioType,
       battery: event.data.battery,
       isCharging: event.data.isCharging,
+      ramUsed: event.data.ramUsed,
+      swapUsed: event.data.swapUsed,
       warning: false
     };
     if (typeof window !== "undefined") {
@@ -253,10 +393,9 @@ export const updateState = (event, previousState) => {
 const workspaceContainerClass = css({
   display: "flex", alignItems: "center", justifyContent: "center",
   width: "36px", height: "36px", borderRadius: "10px",
-  backgroundColor: "rgba(0, 142, 142, 0.23)", color: "#00b3b3",
+  backgroundColor: "rgba(255, 255, 255, 0.15)", color: "#ffffff",
   fontWeight: "800", fontSize: "20px",
-  animation: "blinkFlash 0.25s ease-out",
-  boxShadow: "0 2px 8px rgba(0,0,0,0.2)"
+  boxShadow: "0 2px 8px rgba(0, 0, 0, 0.2)"
 });
 const monitorsWrapperClass = css({
   flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-start",
@@ -266,7 +405,7 @@ const monitorSectionBase = css({
   display: "flex", flexDirection: "column", alignItems: "center", gap: "10px", width: "100%"
 });
 const monitorTitleClass = css({
-  fontSize: "10px", color: "#00b3b3d3", fontWeight: "bold", textAlign: "center", lineHeight: "1", opacity: 0.8
+  fontSize: "10px", color: "rgba(255, 255, 255, 0.7)", fontWeight: "bold", textAlign: "center", lineHeight: "1", opacity: 0.8
 });
 const appContainerClass = css({
   display: "flex", flexDirection: "column", alignItems: "center", gap: "2px"
@@ -292,7 +431,7 @@ const monthFmt = new Intl.DateTimeFormat('en-US', { month: 'long' });
 const dayFmt = new Intl.DateTimeFormat('en-US', { weekday: 'short' });
 const timeFmt = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 
-export const render = ({ warning, workspace, monitors, wifiSpeed, audioType, battery, isCharging }) => {
+export const render = ({ warning, workspace, monitors, wifiSpeed, audioType, battery, isCharging, ramUsed, swapUsed }) => {
   if (warning) {
     return <div>{warning}</div>;
   }
@@ -317,66 +456,84 @@ export const render = ({ warning, workspace, monitors, wifiSpeed, audioType, bat
   const WifiIconComponent = wifiSpeed === "Off" ? IconWifiOff : IconWifi;
 
   return (
-    <div className={containerClassName}>
-      <style>{`
-        @keyframes blinkFlash {
-          0% { background-color: rgb(0, 177, 177); color: #FFF; transform: scale(1.15); }
-          100% { background-color: rgba(0, 179, 179, 0.2); color: #00b3b3; transform: scale(1); }
-        }
-      `}</style>
-      <div className={metricsStyle}>
-        <div className={metricsStyleColumn}>
-          <div className={metricStyle} style={{ gap: "4px" }}>
-            <IconApple className={cyan} style={{ marginBottom: "2px", width: "34px", height: "34px" }} />
-            <span style={{ fontSize: "12px", fontWeight: "600", textTransform: "uppercase" }}>{month}</span>
-            <span style={{ fontSize: "12px", fontWeight: "600", whiteSpace: "nowrap" }}>{day} {dayNum}</span>
-            <span style={{ fontSize: "12px", fontWeight: "600" }}>{time}</span>
-          </div>
-          <div className={metricStyle}>
-            <div key={workspace} className={workspaceContainerClass}>
-              {workspace}
-            </div>
-          </div>
-        </div>
-        <div className={monitorsWrapperClass}>
-          {monitors && monitors.length > 0 ? monitors.map((monitor, mIdx) => (
-            <div key={mIdx} className={monitorSectionBase} style={{ borderTop: mIdx > 0 ? "1px solid rgba(0,179,179,0.3)" : "none", paddingTop: mIdx > 0 ? "10px" : "0" }}>
-              <div className={monitorTitleClass}>
-                {monitor.name.includes("Built-in") ? "MAC" : monitor.name.substring(0, 3).toUpperCase()}
+    <div style={{ width: "100%", height: "100%" }}>
+      {/* Left Panel */}
+      <div className={leftPanelClass}>
+        <div className={containerClassName}>
+          <div className={straightRightBorder} />
+          <div className={topFlare} />
+          <div className={bottomFlare} />
+          <div className={metricsStyle}>
+            <div className={metricsStyleColumn}>
+              <div className={metricStyle} style={{ gap: "4px" }}>
+                <IconApple className={cyan} style={{ marginBottom: "2px", width: "34px", height: "34px" }} />
+                <span style={{ fontSize: "12px", fontWeight: "600", textTransform: "uppercase" }}>{month}</span>
+                <span style={{ fontSize: "12px", fontWeight: "600", whiteSpace: "nowrap" }}>{day} {dayNum}</span>
+                <span style={{ fontSize: "12px", fontWeight: "600" }}>{time}</span>
               </div>
-              {monitor.apps.map((appObj, i) => (
-                <div key={i} className={appContainerClass} title={appObj.name}>
-                  <img 
-                    src={window.statBarIconCache?.has(appObj.name) ? `SideBar.widget/icons/${appObj.name}.png` : "SideBar.widget/icons/fallback.png"} 
-                    style={{ width: "32px", height: "32px", objectFit: "contain" }}
-                  />
-                  <div className={appBadgesWrapperClass}>
-                    {appObj.workspaces.map(ws => (
-                      <span key={ws} className={badgeBase} style={{
-                        backgroundColor: ws === workspace ? "rgba(0,179,179,0.2)" : "rgba(0,0,0,0.4)",
-                        color: ws === workspace ? "#00b3b3" : "#fff"
-                      }}>
-                        {ws}
-                      </span>
-                    ))}
-                  </div>
+              <div className={metricStyle}>
+                <div key={workspace} className={workspaceContainerClass}>
+                  {workspace}
                 </div>
-              ))}
+              </div>
             </div>
-          )) : <div className={metricStyle}><span>-</span></div>}
-        </div>
-        <div className={metricsStyleColumn}>
-          <div className={metricStyle}>
-            <BatteryIcon className={cyan} /> {battery}%
-          </div>
-          <div className={metricStyle}>
-            <AudioIcon className={cyan} /> {audioLabel}
-          </div>
-          <div className={metricStyle}>
-            <WifiIconComponent className={cyan} /> {wifiSpeed}
+            <div className={monitorsWrapperClass}>
+              {monitors && monitors.length > 0 ? monitors.map((monitor, mIdx) => (
+                <div key={mIdx} className={monitorSectionBase} style={{ borderTop: mIdx > 0 ? "1px solid rgba(255, 255, 255, 0.2)" : "none", paddingTop: mIdx > 0 ? "10px" : "0" }}>
+                  <div className={monitorTitleClass}>
+                    {monitor.name.includes("Built-in") ? "MAC" : monitor.name.substring(0, 3).toUpperCase()}
+                  </div>
+                  {monitor.apps.map((appObj, i) => (
+                    <div key={i} className={appContainerClass} title={appObj.name}>
+                      <img 
+                        src={window.statBarIconCache?.has(appObj.name) ? `SideBar.widget/icons/${appObj.name}.png` : "SideBar.widget/icons/fallback.png"} 
+                        style={{ width: "32px", height: "32px", objectFit: "contain" }}
+                      />
+                      <div className={appBadgesWrapperClass}>
+                        {appObj.workspaces.map(ws => (
+                          <span key={ws} className={badgeBase} style={{
+                            backgroundColor: ws === workspace ? "rgba(255, 255, 255, 0.25)" : "rgba(0,0,0,0.4)",
+                            color: ws === workspace ? "#ffffff" : "#aaaaaa"
+                          }}>
+                            {ws}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )) : <div className={metricStyle}><span>-</span></div>}
+            </div>
+            <div className={metricsStyleColumn}>
+              {isCharging && ramUsed && (
+                <div className={metricStyle}>
+                  <span style={{ fontSize: "10px", color: "rgba(255, 255, 255, 0.5)", fontWeight: "bold" }}>RAM</span>
+                  <span style={{ fontSize: "11px" }}>{ramUsed}G</span>
+                </div>
+              )}
+              {isCharging && swapUsed && (
+                <div className={metricStyle}>
+                  <span style={{ fontSize: "10px", color: "rgba(255, 255, 255, 0.5)", fontWeight: "bold" }}>SWP</span>
+                  <span style={{ fontSize: "11px" }}>{swapUsed}</span>
+                </div>
+              )}
+              <div className={metricStyle}>
+                <BatteryIcon className={cyan} /> {battery}%
+              </div>
+              <div className={metricStyle}>
+                <AudioIcon className={cyan} /> {audioLabel}
+              </div>
+              <div className={metricStyle}>
+                <WifiIconComponent className={cyan} /> {wifiSpeed}
+              </div>
+            </div>
           </div>
         </div>
       </div>
+
+      {/* Right Side Curves */}
+      <div className={rightPanelTopFlare} />
+      <div className={rightPanelBottomFlare} />
     </div>
   );
 };
