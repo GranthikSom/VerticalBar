@@ -6,7 +6,7 @@ A sleek, event-driven, zero-polling workspace widget for [AeroSpace](https://git
 <img src="preview/previewmain.png" alt="preview" width="100%">
 
 
-<img src="preview/preview1.jpg" width="50%"/> | <img src="preview/preview2.jpg" width="50%"/> 
+<img src="preview/preview1.jpg" width="49%"/> | <img src="preview/preview2.jpg" width="49%"/> 
 
 ## ✨ Features
 - **AeroSpace Integration**: Instantly tracks workspaces and active windows across multiple monitors.
